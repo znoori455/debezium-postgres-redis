@@ -1,0 +1,124 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: cdc-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: testdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_wal_senders=1"
+      - "-c"
+      - "max_replication_slots=1"
+    networks:
+      - cdc-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: cdc-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - cdc-network
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: cdc-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - cdc-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: cdc-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - cdc-network
+
+  debezium:
+    image: debezium/connect:2.4
+    container_name: cdc-debezium
+    depends_on:
+      - kafka
+      - postgres
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: kafka:29092
+      GROUP_ID: 1
+      CONFIG_STORAGE_TOPIC: debezium_configs
+      OFFSET_STORAGE_TOPIC: debezium_offsets
+      STATUS_STORAGE_TOPIC: debezium_statuses
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      CONNECT_VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+    networks:
+      - cdc-network
+
+  consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cdc-consumer
+    depends_on:
+      - kafka
+      - redis
+      - postgres
+    ports:
+      - "5678:5678"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: testdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      # For debugging
+      PYTHONUNBUFFERED: 1
+    volumes:
+      - ./consumer/consumer.py:/app/consumer.py
+      # - ./consumer/consumer.py:/app/consumer.py
+    # command: watchmedo auto-restart --directory=/app --pattern=*.py --recursive -- python -u /app/consumer.py
+    # command: watchmedo auto-restart --directory=/app --pattern=*.py --recursive -- python -u /app/consumer.py
+    # command: python -Xfrozen_modules=off -m debugpy --wait-for-client --listen 0.0.0.0:5678 -m watchdog.watchmedo auto-restart -d /app -p '*.py' --recursive --signal SIGTERM -- python /app/consumer.py # Adjust main.py path
+    # command: watchmedo auto-restart --directory=/app --pattern=* --recursive -- python -Xfrozen_modules=off -u /app/consumer.py
+    command: python -Xfrozen_modules=off -u /app/consumer.py 
+    networks:
+      - cdc-network
+    # For debugging with pdb
+    stdin_open: true
+    tty: true
+
+networks:
+  cdc-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
